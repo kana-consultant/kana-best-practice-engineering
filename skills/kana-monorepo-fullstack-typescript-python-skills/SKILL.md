@@ -7,6 +7,38 @@ description: Enforce Kana monorepo best practices when writing FastAPI (Python) 
 
 A prescriptive guide for the Kana stack: **FastAPI Clean Architecture** on the backend, **TanStack Router + Query + Form** on the frontend(s), wired together through a generated OpenAPI client, and orchestrated by moon across pnpm and uv.
 
+## Before You Scaffold — ASK
+
+Before generating any code from this skill, stop and ask the user one question:
+
+> **Will this app be multi-tenant (organization-scoped), or single-tenant?**
+
+The answer changes the scaffold materially. Do not guess. Default to asking even if the prompt looks obvious — a wrong assumption here costs a full refactor later.
+
+### If **multi-tenant** (default for this skill)
+
+Keep every rule in this document as written:
+- `organization_id` CASCADE FK on every tenant-scoped table.
+- `organization_id` as the **first** positional arg on every tenant-scoped repo method.
+- `OrgContext` / `ActiveOrg` dep in `presentation/`; `require_role` / `require_permission` enforce org role.
+- Two-layer role system: platform `super-admin` + org `owner | admin | member`.
+- Frontend `$orgSlug` route layer.
+
+### If **single-tenant**
+
+Strip before scaffolding — do not leave dead code:
+- Drop `organization_id` columns, FKs, and repo-method args. Repo methods take their natural key only.
+- Delete `domain/organization/`, `domain/member/`, `domain/role/` (org-role) and their infra/presentation counterparts.
+- Drop `OrgContext` / `ActiveOrg` / `require_role` (org axis); keep a single `CurrentUser`-based `require_role(*roles: AppRole)` if you still need admin vs user.
+- Skip the `$orgSlug` frontend layer — features live directly under `_authenticated/`.
+- Skip the platform-vs-org split. One `AppRole = Literal["admin", "user"]` is enough.
+
+### If unsure or "mostly single with one org feature later"
+
+Scaffold single-tenant now. Adding tenancy later is a well-defined migration (create `organization`, add FK on one table, add scope on one repo, add dep). Pre-building tenancy you never use is not.
+
+---
+
 ## Core Principles
 
 - **Max 200 LOC per file** across Python, TSX, and TS. Split instead of growing.

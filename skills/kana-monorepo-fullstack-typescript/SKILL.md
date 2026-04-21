@@ -16,6 +16,41 @@ Reference stack (see `https://github.com/kana-consultant/saas-boilerplate`):
 | Lint/format | Biome (tabs, double quotes, no semicolons) |
 | Test | Vitest |
 
+## 0. Before you scaffold — ASK
+
+Before generating any code from this skill, stop and ask the user one question:
+
+> **Will this app be multi-tenant (organization-scoped), or single-tenant?**
+
+The answer changes the scaffold materially. Do not guess. Default to asking even if the prompt looks obvious — a wrong assumption here costs a full refactor later.
+
+### If **multi-tenant** (default for this skill)
+
+Keep everything below as written:
+- `organization`, `member`, `role` aggregates in `domain/`
+- `$orgSlug.tsx` + `$orgSlug/` layout in `routes/_authenticated/`
+- `_authenticated/org/` onboarding (create / select org)
+- Org-role middleware (`requireRole`, `requirePermission`)
+- `member.organizationId` FK with `onDelete: "cascade"` on every org-scoped table
+- `orgRole` on router context, `ctx.orgRole` in use-cases
+- Two-layer role system (platform `super-admin` + org `owner|admin|member`)
+
+### If **single-tenant**
+
+Strip the following before scaffolding — do not leave dead code:
+- Delete `domain/{organization,member,role}/` and their repos.
+- Delete `routes/_authenticated/org/` and collapse `$orgSlug.tsx` + `$orgSlug/` — promote its children directly under `_authenticated/`.
+- Drop `orgRole` from router context + `AuthedContext`; drop `requireActiveOrg`, `assertOutranksTarget`.
+- Keep `requireRole` but on the single `user.role` axis only (`admin | user`).
+- Drop `organizationId` FK columns and all `WHERE organization_id = ...` scopes.
+- Drop the org-side of `better-auth` plugins (`organizationClient()`); keep `adminClient` for platform-admin UX.
+
+### If unsure or "mixed" (most of app single-tenant, one feature org-scoped later)
+
+Scaffold single-tenant now. Adding tenancy later is a well-defined migration (add `organization`, add FK on one table, add scope on one repo). Pre-building tenancy you never use is not.
+
+---
+
 ## 1. Workspace layout
 
 ```
