@@ -73,6 +73,19 @@ class User:
     created_at: datetime | None = None
 ```
 
+Allowed imports inside `domain/`: stdlib + `pydantic` value objects only. No `enum.Enum` — use `Literal[...]` + a `tuple[str, ...]` constant for runtime iteration:
+
+```python
+AppRole = Literal["owner", "admin", "member"]
+APP_ROLE_VALUES: tuple[AppRole, ...] = ("owner", "admin", "member")
+
+ASSESSMENT_STATUS_VALUES: tuple[str, ...] = ("not_started", "partial", "mostly_ready", "compliant")
+```
+
+Cheap (de)serialization, no enum-string conversion churn at DB/JSON boundary.
+
+Domain errors subclass a single `DomainError`. Each subclass maps to exactly one HTTP status in the presentation layer (`NotFoundError` → 404, `ForbiddenError` → 403, `ConflictError` → 409). Never spread status choices across routers.
+
 ### Repository protocol in domain, implementation in infrastructure
 
 ```python
@@ -100,6 +113,39 @@ class SqlAlchemyUserRepository:
 ```
 
 A module-level `_to_domain(row) -> Entity` function bridges ORM ↔ domain. Never leak `UserOrm` out of `infrastructure/`.
+
+### Tenant isolation
+
+- Every tenant-scoped table declares `organization_id: Mapped[str] = mapped_column(ForeignKey("organization.id", ondelete="CASCADE"), index=True)`.
+- Every repo method that touches a tenant-scoped table takes `organization_id` as its **first** positional arg. No ambient tenant via contextvars, no middleware magic.
+- Defense-in-depth: authz dependency in `presentation/` + `WHERE organization_id = :org_id` in `infrastructure/`. Both must be present.
+
+```python
+async def list_by_org(self, organization_id: str) -> list[GapItem]: ...
+async def find_thread(self, organization_id: str, user_id: str, thread_id: str) -> ChatThread | None: ...
+```
+
+### Typed ORM
+
+SQLAlchemy 2 `Mapped[...]` + `mapped_column(...)` only — no legacy `Column(...)`. Timestamp columns use a shared `_utcnow` helper so `default` and `onupdate` stay consistent:
+
+```python
+def _utcnow() -> datetime:
+    return datetime.now(tz=UTC)
+
+class ChatThreadOrm(Base):
+    __tablename__ = "chat_thread"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organization.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+```
 
 ### Use case per file in `application/`
 
@@ -154,6 +200,74 @@ async def update_me(
 - Each domain exception type (`NotFoundError`, `ForbiddenError`) maps to a single `HTTPException` status — do not scatter status choices.
 - Routers are thin: validate → call use case / repo → commit → serialize.
 - Mount everything under `/v1` via `create_app()`; nested domains like `/orgs/{slug}/...` are composed with sub-`APIRouter`s.
+- Response DTOs expose a `@classmethod from_domain(cls, entity) -> Self` factory. Domain entities never embed `pydantic.BaseModel`; translation is one-way at the boundary.
+
+### Router sub-package for big modules
+
+When a single module's router would breach the 200-LOC cap, split into a package whose `__init__.py` re-exports one `APIRouter`:
+
+```
+presentation/auth/router/
+├── __init__.py          # builds + re-exports the single APIRouter
+├── core.py              # login / register / logout
+├── verification.py      # OTP
+├── sessions.py
+└── password.py
+```
+
+Each sub-file owns an `APIRouter()` and `__init__.py` calls `router.include_router(...)` on each — so mount-point URLs stay stable.
+
+### RBAC factory
+
+`require_role` and `require_permission` are closures that return a FastAPI dependency. Platform super-admin always bypasses org-role checks:
+
+```python
+def require_role(*allowed: AppRole) -> Callable[..., Awaitable[OrgContext]]:
+    async def _dep(user: CurrentUser, ctx: ActiveOrg) -> OrgContext:
+        if user.role == PLATFORM_SUPER_ADMIN:
+            return ctx
+        if ctx.role not in allowed:
+            raise HTTPException(403, "required role: " + " or ".join(allowed))
+        return ctx
+    return _dep
+```
+
+Usage: `ctx: Annotated[OrgContext, Depends(require_role("owner", "admin"))]`.
+
+### Settings singleton
+
+`pydantic-settings` instance is cached for the process lifetime, and enforces prod invariants at boot (fail fast, not at first request):
+
+```python
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
+
+class Settings(BaseSettings):
+    jwt_secret: str
+    @field_validator("jwt_secret")
+    @classmethod
+    def _min_len(cls, v: str) -> str:
+        if len(v) < 32:
+            raise ValueError("JWT_SECRET must be >= 32 chars")
+        return v
+```
+
+### Server-Sent Events
+
+Long-lived streaming endpoints share one helper and one header set. A 2 KiB comment preamble defeats nginx / Cloudflare buffer pre-flush so the first real event reaches the client immediately:
+
+```python
+def _sse(event: str, payload: object) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+
+_SSE_PREAMBLE = (":" + " " * 2048 + "\n\n").encode("utf-8")
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
+```
 
 ### Ruff layering enforcement
 
@@ -164,6 +278,7 @@ async def update_me(
 - `pytest` + `pytest-asyncio` with `asyncio_mode = "auto"`.
 - Unit tests live in `tests/unit/{layer}/...` and mirror the `src/` tree.
 - Test each use case against fake repos that implement the domain Protocol — no SQLAlchemy in unit tests.
+- `tests/test_layering.py` is the layering smoke test: it instantiates one real use case wired entirely with in-memory fakes of every `Protocol` port and runs `.execute()`. If the inner layers accidentally grow an import into `infrastructure` or `presentation`, this test fails at import time. Keep it cheap; its job is structural, not functional.
 
 ### OpenAPI export
 
@@ -393,3 +508,8 @@ After bumping, regenerate `apps/api/openapi.json` and `apps/{web,admin}/src/libs
 10. Tabs for JS/TS/CSS/JSON/MD/YAML, 4-space for Python. Match existing files when editing.
 11. 200 LOC ceiling is a hard cap — split before you hit it.
 12. No `--no-verify`, no amending published commits, no skipping hooks.
+13. Tenant-scoped repo methods take `organization_id` as the first positional arg; tables FK to `organization` with `ondelete="CASCADE"`.
+14. Response DTOs expose `from_domain(...)`; domain entities never import `pydantic.BaseModel`.
+15. No `enum.Enum` — use `Literal[...]` plus a `tuple[...]` of values.
+16. Settings are a `@lru_cache(maxsize=1)` singleton with boot-time validators; never read env vars ad-hoc outside `Settings`.
+17. Big routers split into a sub-package re-exporting one `APIRouter`; never silence `TID251` inside `domain/` or `application/`.
