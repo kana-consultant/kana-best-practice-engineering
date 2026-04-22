@@ -16,6 +16,41 @@ Reference stack (see `https://github.com/kana-consultant/saas-boilerplate`):
 | Lint/format | Biome (tabs, double quotes, no semicolons) |
 | Test | Vitest |
 
+## 0. Before you scaffold — ASK
+
+Before generating any code from this skill, stop and ask the user one question:
+
+> **Will this app be multi-tenant (organization-scoped), or single-tenant?**
+
+The answer changes the scaffold materially. Do not guess. Default to asking even if the prompt looks obvious — a wrong assumption here costs a full refactor later.
+
+### If **multi-tenant** (default for this skill)
+
+Keep everything below as written:
+- `organization`, `member`, `role` aggregates in `domain/`
+- `$orgSlug.tsx` + `$orgSlug/` layout in `routes/_authenticated/`
+- `_authenticated/org/` onboarding (create / select org)
+- Org-role middleware (`requireRole`, `requirePermission`)
+- `member.organizationId` FK with `onDelete: "cascade"` on every org-scoped table
+- `orgRole` on router context, `ctx.orgRole` in use-cases
+- Two-layer role system (platform `super-admin` + org `owner|admin|member`)
+
+### If **single-tenant**
+
+Strip the following before scaffolding — do not leave dead code:
+- Delete `domain/{organization,member,role}/` and their repos.
+- Delete `routes/_authenticated/org/` and collapse `$orgSlug.tsx` + `$orgSlug/` — promote its children directly under `_authenticated/`.
+- Drop `orgRole` from router context + `AuthedContext`; drop `requireActiveOrg`, `assertOutranksTarget`.
+- Keep `requireRole` but on the single `user.role` axis only (`admin | user`).
+- Drop `organizationId` FK columns and all `WHERE organization_id = ...` scopes.
+- Drop the org-side of `better-auth` plugins (`organizationClient()`); keep `adminClient` for platform-admin UX.
+
+### If unsure or "mixed" (most of app single-tenant, one feature org-scoped later)
+
+Scaffold single-tenant now. Adding tenancy later is a well-defined migration (add `organization`, add FK on one table, add scope on one repo). Pre-building tenancy you never use is not.
+
+---
+
 ## 1. Workspace layout
 
 ```
@@ -27,12 +62,26 @@ apps/
     tsconfig.json         # paths: "#/*": ["./src/*"]
     src/
       index.ts            # type-only barrel: AppRouter, Session, AppRole, AppRouterClient
-      main.ts              # Hono entry, wires deps, mounts /auth /rpc /api, optional SPA static
+      main.ts             # Hono entry, wires deps, mounts /auth /rpc /api, optional SPA static
+      migrate.ts          # standalone migration runner (prod entrypoint)
       polyfill.ts
       domain/             # pure types + ports (NO framework imports)
+        activity/ member/ organization/ role/ session/ user/
+        ports/            # cache.ts, auth-service.ts, ...
       application/        # use-cases (pure functions of deps)
+        shared/           # context.ts, errors.ts, authorization.ts (+ tests)
+        user/             # ban-user.ts, create-user.ts, list-users.ts, set-role.ts, ...
+        role/ activity/ auth/
+        use-cases.ts      # buildUseCases(deps) → single UseCases object
       infrastructure/     # concrete adapters (drizzle, redis, better-auth, env)
-      presentation/       # orpc context/middleware/schemas + routers
+        auth/             # better-auth.ts, auth-service.ts
+        cache/            # redis.ts
+        config/           # env.ts (Zod-validated)
+        db/               # client.ts, schema.ts, seed.ts, repositories/
+        observability/    # logger.ts
+      presentation/
+        orpc/             # context.ts, middleware.ts, schemas.ts, error-mapping.ts
+        routers/          # index.ts + <aggregate>.ts (activity, auth, role, user, ...)
   web/                    # @saas/web — SPA
     vite.config.ts        # proxies /rpc /auth /api to :3001 in dev
     tsconfig.json         # paths: "#/*": ["./src/*", "../api/src/*"] (types-only!)
@@ -40,19 +89,30 @@ apps/
       main.tsx
       router.tsx
       routeTree.gen.ts    # generated — NEVER edit, keep in biome ignore
-      routes/
-        __root.tsx
-        _public/          # auth pages
-        _authenticated/
-          $orgSlug/       # org-scoped pages
-          _components/    # co-located UI (prefix `_` is ignored by router plugin)
-          _data/          # co-located mock/static data
-      components/ui/      # shadcn/ui primitives
+      styles.css
+      components/
+        ui/               # shadcn/ui primitives
+        {feature}/        # only if shared across routes; feature UI colocates in routes
+      hooks/              # global app-wide hooks (distinct from route-local `_hooks/`)
       libs/
         auth/             # better-auth react client + shared permissions
         orpc/             # typed client (imports AppRouter from @saas/api)
-        tanstack-query/ tanstack-form/ tanstack-table/ tanstack-db/ tanstack-store/
-        paraglide/ posthog/ clsx/ errors/ hooks/
+        tanstack-{query,form,table,db,store}/
+        clsx/ errors/ hooks/
+        paraglide/ posthog/                # OPTIONAL — add when needed
+      routes/
+        __root.tsx
+        index.tsx                            # landing
+        _public.tsx / _public/               # layout file + children folder (pair)
+        _authenticated.tsx / _authenticated/ # same pair pattern
+          _components/                       # auth-scope shared UI
+          _data/                             # auth-scope shared static/mock data
+          org/                               # org onboarding (pre-$orgSlug)
+          $orgSlug.tsx / $orgSlug/           # org layout file + children folder
+            <feature>.tsx                    # default — feature as single file
+            <feature>/                       # promote to folder when it grows
+              index.tsx
+              _apis/ _components/ _hooks/    # feature-local, scope by placement
 .moon/
   workspace.yml           # projects: apps/*, vcs.defaultBranch
   toolchain.yml           # node + pnpm versions
@@ -169,8 +229,9 @@ const envSchema = z.object({
 
 - `orpc/context.ts`: `ORPCContext { headers, session, orgRole, useCases }`.
 - `orpc/middleware.ts`: `publicProcedure` (maps `AppError` → `ORPCError`), `protectedProcedure` (requires session), `requireRole(...roles)`, `requirePermission(resource, actions)`, shortcuts `adminProcedure`, `ownerProcedure`, `platformSuperAdminProcedure`. Plus `toAuthedContext(ctx)` helper.
+- `orpc/error-mapping.ts`: single source of truth for `AppErrorCode` → `ORPCError` code + HTTP status. Middleware imports the mapping here — do not inline status choices anywhere else.
 - `orpc/schemas.ts`: Zod input schemas reused across procedures.
-- `routers/<aggregate>.ts`: `buildXRouter(useCases.x)` — thin handlers that call use-cases.
+- `routers/<aggregate>.ts`: `buildXRouter(useCases.x)` — thin handlers that call use-cases. Flat file per aggregate (activity, auth, role, user, …), no sub-folders.
 - `routers/index.ts`: `buildRouter(useCases)` composing `health`, `me`, `auth`, `admin: { ...user, ...role, ...activity }`. Export type `AppRouter`.
 
 ```ts
@@ -205,8 +266,14 @@ export function buildUserRouter(useCases: UseCases["user"]) {
 ### 3.1 Routing
 
 - TanStack Router, file-based, `autoCodeSplitting: true`.
-- Route layouts: `__root.tsx` → `_public.tsx` | `_authenticated.tsx` → `$orgSlug.tsx` → individual pages.
-- `routeFileIgnorePattern: "^(_hooks|_components|_server|_data)"` — prefix folders with `_` to colocate non-route files inside a route folder.
+- **Layout = file + sibling folder pair.** `_public.tsx` is the layout component (guard + `<Outlet/>`); `_public/` holds children rendered inside it. Same for `_authenticated.tsx`/`_authenticated/` and `$orgSlug.tsx`/`$orgSlug/`. Both must exist — the `.tsx` alone renders no children, the folder alone has no guard.
+- Route hierarchy: `__root.tsx` → (`_public.tsx` | `_authenticated.tsx`) → `$orgSlug.tsx` → feature.
+- **Features start as single files** under `$orgSlug/` (e.g. `users.tsx`, `dashboard.tsx`). Promote to a folder (`users/index.tsx` + `_apis/ _components/ _hooks/`) when the single file outgrows readability. Do not pre-promote.
+- `routeFileIgnorePattern: "^(_apis|_components|_data|_hooks)"`. Underscore folders are invisible to the router and may live at **any** layout level — scope is implicit from placement:
+  - `_authenticated/_components/`, `_authenticated/_data/` → auth-scope shared
+  - `$orgSlug/_apis/`, `$orgSlug/_hooks/` → org-scope shared
+  - `<feature>/{_apis,_components,_hooks}/` → feature-local
+- Global (cross-layout) hooks and UI live at `src/hooks/` and `src/components/` — not under `routes/`.
 - Router context carries `{ queryClient, session, orgRole }`; `__root` `beforeLoad` fetches session via the oRPC client.
 - `_authenticated.tsx` redirects to `/auth/login` when session is null.
 - Page-level role gates in `beforeLoad` (e.g. redirect non-admins from `/users`).
@@ -272,7 +339,8 @@ Split large vendors in `vite.config.ts` `rollupOptions.output.manualChunks`: `po
 - Schema in `apps/api/src/infrastructure/db/schema.ts`.
 - Migrations generated into `apps/api/drizzle/`, **committed**.
 - Dev workflow: `pnpm db:push` (direct schema apply).
-- Prod workflow: edit schema → `pnpm db:generate` → commit SQL → deploy runs `pnpm db:migrate`.
+- Prod workflow: edit schema → `pnpm db:generate` → commit SQL → deploy runs `apps/api/src/migrate.ts` as a standalone entrypoint (not the server). Keeps migrations decoupled from app boot.
+- Seeding: `infrastructure/db/seed.ts` is the one authoritative seed script — invoked by `pnpm db:seed`. Idempotent; safe to re-run.
 - CI enforces no drift: runs `drizzle-kit generate` on every PR and fails if the diff is non-empty.
 - Repositories never leak Drizzle types — return domain shapes.
 
