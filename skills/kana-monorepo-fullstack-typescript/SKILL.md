@@ -325,13 +325,70 @@ Split large vendors in `vite.config.ts` `rollupOptions.output.manualChunks`: `po
 
 `?lang=` query param drives locale. `validateSearch` on `__root` with Zod enum. Messages live in `libs/paraglide/messages/`. Generated code (`libs/paraglide/generated/**`) excluded from lint.
 
+### 3.8 TanStack frontend conventions
+
+#### Naming & prefixes
+- Prefix `T` for types (e.g. `TUserItems`, `TCreateUserPayload`), `I` for interfaces (e.g. `IUserData`), `E` for enums (e.g. `EUserGender`).
+- **Always use kebab-case** for file and folder names (e.g. `user-profile.tsx`, `auth-guard.tsx`).
+
+#### Component organization
+```
+src/components/
+├── ui/           # Reusable UI primitives (Button, Input, Card, Table)
+├── features/     # Domain-specific composites (UserForm, AccountTable)
+└── layout/       # Layouts, guards (DashboardLayout, ProtectedRoute)
+```
+
+#### State management
+- **Server state**: TanStack Query (via oRPC `queryOptions` / `mutationOptions`)
+- **Client state**: TanStack Store with selectors
+- **Forms**: TanStack Form + Zod validation
+
+#### Query key factories
+Every feature API must define a query key factory:
+
+```typescript
+export const userKeys = {
+  all: ['users'] as const,
+  lists: () => [...userKeys.all, 'list'] as const,
+  list: (params?: TListParams) => [...userKeys.lists(), params] as const,
+  details: () => [...userKeys.all, 'detail'] as const,
+  detail: (id: string) => [...userKeys.details(), id] as const,
+}
+```
+
+#### Response types
+Standardize API response wrappers:
+
+```typescript
+type TSingleResponse<T> = { data: T; message: string }
+type TListResponse<T> = { data: T[]; pagination: TPaginationMeta }
+```
+
+#### Design principles
+- **Reusability-first**: extract shared logic before the third call site.
+- **Single responsibility per file**: one component, one hook, one service.
+- **High cohesion**: group related logic together within modules.
+- **Low coupling**: minimize dependencies between modules, use clean interfaces.
+
+#### Rules
+1. Always use query key factories — never inline query keys.
+2. Invalidate queries on mutations.
+3. Separate types from implementation.
+4. Use barrel exports (`index.ts`).
+5. Keep components pure when possible.
+6. Extract reusable logic to hooks.
+7. Use Zod for all form validation.
+
 ## 4. TypeScript conventions
 
 - `tsconfig.base.json`: `strict`, `noUnusedLocals`, `noUnusedParameters`, `noFallthroughCasesInSwitch`, `verbatimModuleSyntax`, `allowImportingTsExtensions`, `noEmit`.
 - **Always use `.ts`/`.tsx` file extensions in relative imports** (required by `verbatimModuleSyntax` + `allowImportingTsExtensions`).
 - Path alias `#/*` → project `src/*`. Web also aliases `#/*` to include `../api/src/*` for type-only imports.
 - `import type { ... }` for pure type imports.
+- Prefix `T` for types, `I` for interfaces, `E` for enums (see §3.8).
 - Prefer `interface` for public shapes, `type` for unions/utility types.
+- Strict TypeScript — no `any`.
 - Use `ts-pattern` (`match(x).with(...).otherwise(...)`) for exhaustive branching on tagged unions or session shapes.
 
 ## 5. Database (Drizzle)

@@ -46,7 +46,8 @@ Scaffold single-tenant now. Adding tenancy later is a well-defined migration (cr
 - **Clean Architecture dependency rule**: `domain` → `application` → `infrastructure` / `presentation`. Inner layers must not import outer ones, and must not import frameworks (FastAPI, SQLAlchemy, pydantic-settings). This is enforced by `ruff`'s `flake8-tidy-imports.banned-api` — do not silence it outside outer layers.
 - **Single responsibility per file** — one use case, one repository, one router, one component.
 - **Reusability-first**: when two call sites need the same logic, extract to `_shared/` (Python) or `libs/` (TS) before the third appears.
-- **Strict typing**: `pyright` strict (0 errors), TypeScript `strict`, no `any`.
+- **Strict typing**: `pyright` strict (0 errors), TypeScript `strict`, no `any`. Prefix `T` for types, `I` for interfaces, `E` for enums.
+- **Kebab-case** for all TS/TSX file and folder names.
 
 ## Repo Layout
 
@@ -318,6 +319,61 @@ _SSE_HEADERS = {
 
 ## Frontend — TanStack Apps (`web`, `admin`)
 
+### TanStack conventions
+
+#### Naming & prefixes
+- Prefix `T` for types (e.g. `TUserItems`, `TCreateUserPayload`), `I` for interfaces (e.g. `IUserData`), `E` for enums (e.g. `EUserGender`).
+- **Always use kebab-case** for file and folder names (e.g. `user-profile.tsx`, `auth-guard.tsx`).
+
+#### Component organization
+```
+src/components/
+├── ui/           # Reusable UI primitives (Button, Input, Card, Table)
+├── features/     # Domain-specific composites (UserForm, AccountTable)
+└── layout/       # Layouts, guards (DashboardLayout, ProtectedRoute)
+```
+
+#### State management
+- **Server state**: TanStack Query
+- **Client state**: TanStack Store with selectors
+- **Forms**: TanStack Form + Zod validation
+
+#### API layer pattern
+
+Every feature API in `_apis/` must follow this structure with typed wrappers, query key factories, and hooks:
+
+**Query key factories** — always define, never inline keys:
+```typescript
+export const userKeys = {
+  all: ['users'] as const,
+  lists: () => [...userKeys.all, 'list'] as const,
+  list: (params?: TListParams) => [...userKeys.lists(), params] as const,
+  details: () => [...userKeys.all, 'detail'] as const,
+  detail: (id: string) => [...userKeys.details(), id] as const,
+}
+```
+
+**Response types** — standardize wrappers:
+```typescript
+type TSingleResponse<T> = { data: T; message: string }
+type TListResponse<T> = { data: T[]; pagination: TPaginationMeta }
+```
+
+#### Design principles
+- **Reusability-first**: extract shared logic before the third call site.
+- **Single responsibility per file**: one component, one hook, one service.
+- **High cohesion**: group related logic together within modules.
+- **Low coupling**: minimize dependencies between modules, use clean interfaces.
+
+#### TanStack rules
+1. Always use query key factories — never inline query keys.
+2. Invalidate queries on mutations.
+3. Separate types from implementation.
+4. Use barrel exports (`index.ts`).
+5. Keep components pure when possible.
+6. Extract reusable logic to hooks.
+7. Use Zod for all form validation.
+
 ### App shell
 
 ```tsx
@@ -494,8 +550,10 @@ src/components/
 
 ### Pre-commit / pre-push
 
-- Husky pre-commit: `lint-staged` → biome on staged JS/TS/CSS/JSON/MD.
-- Husky pre-push: full gate — `biome check` + `tsc` + `ruff check` + `pyright` + `check-max-lines` + `pytest`.
+- [Lefthook](https://lefthook.dev/) pre-commit: `lint-staged` → biome on staged JS/TS/CSS/JSON/MD.
+- Lefthook pre-push: full gate — `biome check` + `tsc` + `ruff check` + `pyright` + `check-max-lines` + `pytest`.
+
+> **Always use Lefthook for git hooks. Never use husky.** See `push-flow-convention` skill for setup.
 
 **Never use `--no-verify`** to push through a failing gate. Fix the root cause.
 
