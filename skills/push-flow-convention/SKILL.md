@@ -9,29 +9,32 @@ Every repository MUST enforce the same pre-commit, pre-push, and versioning flow
 
 ## Required Setup
 
-### 1. Husky (pre-commit + pre-push)
+### 1. Lefthook (pre-commit + pre-push)
+
+> **Always use [Lefthook](https://lefthook.dev/) for git hooks. Never use husky.**
 
 Install once per repo:
 
 ```bash
-pnpm add -D husky lint-staged
-pnpm exec husky init
+pnpm add -D lefthook lint-staged
+pnpm exec lefthook install
 ```
 
-This creates `.husky/`. Add two hook files:
+Create `lefthook.yml` in project root:
 
-`.husky/pre-commit`
-```sh
-pnpm exec lint-staged
+```yaml
+pre-commit:
+  commands:
+    lint-staged:
+      run: pnpm exec lint-staged
+
+pre-push:
+  commands:
+    lint-staged:
+      run: pnpm exec lint-staged --diff="origin/{push_remote_branch}...HEAD"
+    bump:
+      run: pnpm run bump
 ```
-
-`.husky/pre-push`
-```sh
-pnpm exec lint-staged --diff="origin/$(git rev-parse --abbrev-ref HEAD)...HEAD"
-pnpm run bump
-```
-
-Ensure both hook files are executable (`chmod +x .husky/pre-commit .husky/pre-push`).
 
 ### 2. lint-staged
 
@@ -96,8 +99,8 @@ The `feat` rule always wins — a new feature is always a major bump regardless 
 
 Before declaring the push flow set up, confirm:
 
-- [ ] `.husky/pre-commit` exists and runs `lint-staged`
-- [ ] `.husky/pre-push` exists and runs `lint-staged` + `bump`
+- [ ] `lefthook.yml` exists with `pre-commit` and `pre-push` hooks
+- [ ] `pnpm exec lefthook install` has been run (hooks registered in `.git/hooks/`)
 - [ ] `package.json` has a `lint-staged` block
 - [ ] `package.json` has a `bump` script
 - [ ] A dry-run commit triggers lint-staged
