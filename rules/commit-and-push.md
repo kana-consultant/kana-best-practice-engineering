@@ -72,6 +72,9 @@ Every commit and push MUST go through Lefthook's `pre-commit` and `pre-push` hoo
 4. **NEVER use `git push --no-verify`**. If pre-push fails, fix the failing check and push again.
 5. Commit message quality is enforced — reject vague messages like "fix stuff", "update", "wip", "misc".
 6. If Lefthook is not installed, run `pnpm exec lefthook install` before committing. Do not commit without hooks registered.
+7. **NEVER add `Co-Authored-By` trailers for AI tools** (e.g., `Co-Authored-By: Claude Code <noreply@anthropic.com>`). Commits are authored by humans only. No AI attribution in commit messages.
+8. **NEVER stage all files in one commit** (`git add .` or `git add -A` then commit). Group related changes into separate, focused commits. Each commit = one logical change. If a feature touches auth + billing, split into separate commits per module.
+9. Stage files deliberately by name (`git add src/auth/login.ts src/auth/types.ts`). Review what's staged before committing (`git status`, `git diff --cached`).
 
 ## Examples
 
