@@ -1,6 +1,6 @@
 ---
 name: tanstack-frontend-best-practice
-description: Strict PR-blocking best-practices for a standalone TanStack SPA frontend that talks to any backend over REST, typed via openapi-typescript against a shared OpenAPI contract. Backend-agnostic — works against Rust, Go, Python, or any service that publishes OpenAPI. Use when scaffolding a TanStack SPA, adding a frontend feature (route + _apis + _hooks + _components + _schema + _stores + _constants), wiring TanStack Query/Form/Store, gating with the two-tier RBAC Guard, or reviewing frontend code. Enforces a TanStack-only / no-React-hooks discipline, `type`-only TypeScript, `<Guard>` + typed `PERMISSIONS` RBAC, Suspense + ErrorBoundary loading, `Typography`/`DataTable`/`Table` primitives, and the mutation render/fetch lifecycle.
+description: Strict PR-blocking best-practices for a standalone TanStack SPA frontend that talks to any backend over REST, typed via openapi-typescript against a shared OpenAPI contract — with a no-contract fallback lane (Axios apiClient + per-feature Zod wire schemas parsed at the boundary) when the backend publishes no OpenAPI document. Backend-agnostic — works against Rust, Go, Python, or any service, with or without a published contract. Use when scaffolding a TanStack SPA, adding a frontend feature (route + _apis + _hooks + _components + _schema + _stores + _constants), wiring TanStack Query/Form/Store, gating with the two-tier RBAC Guard, or reviewing frontend code. Enforces a TanStack-only / no-React-hooks discipline, `type`-only TypeScript, `<Guard>` + typed `PERMISSIONS` RBAC, Suspense + ErrorBoundary loading, `Typography`/`DataTable`/`Table` primitives, and the mutation render/fetch lifecycle.
 ---
 
 # TanStack Frontend Skill
@@ -10,32 +10,40 @@ Reference stack:
 | Layer            | Tech                                                     |
 | ---------------- | -------------------------------------------------------- |
 | Framework        | React 19 + TanStack Router SPA (file-based) + Vite       |
-| Server state     | TanStack Query (over `openapi-fetch`)                    |
+| Server state     | TanStack Query (`openapi-fetch` · no-contract lane: Axios `apiClient`) |
 | Client state     | TanStack Store (selectors, `_stores/`)                   |
 | Forms            | TanStack Form kit (`createFormHook`) + Zod               |
 | Tables / virtual | TanStack Table / TanStack Virtual (via `DataTable`)      |
-| Types            | `openapi-typescript` from the backend's OpenAPI contract |
+| Types            | `openapi-typescript` from OpenAPI · no contract → Zod wire schemas + `z.infer` (§2b) |
 | Headless UI      | `react-aria-components` (aria + supporting attrs)         |
 | Styling          | Tailwind v4 + shadcn/ui + `cn()` + `cva`                 |
 | Animation        | `motion` (framer-motion v12) — declarative variants      |
 | Lint/format      | Biome (tabs, double quotes, semicolons as-needed)        |
 | Test             | Vitest (colocated `__tests__/`)                          |
 
-This skill is for a **standalone SPA repo**. The backend is a separate service reached over HTTP; it can be written in **any language** (Rust, Go, Python, etc.). There is no shared runtime code and no end-to-end TS types — the only contract between front and back is the OpenAPI document.
+This skill is for a **standalone SPA repo**. The backend is a separate service reached over HTTP; it can be written in **any language** (Rust, Go, Python, etc.). There is no shared runtime code and no end-to-end TS types — the contract between front and back is the backend's OpenAPI document when one exists (§2a), or FE-owned Zod wire schemas parsed at the response boundary when none does (§2b).
 
 > **This is the strict, PR-blocking standard.** Every rule below blocks a merge. Running code is not the bar — code that runs but breaks a rule here is debt. Do not copy an existing repo's shortcuts; conform to this file. Self-check with §14 before saying done.
 
 ## 0. Before you scaffold — ASK
 
-Before generating code, stop and ask the user one question:
+Before generating code, stop and ask the user two questions:
 
-> **Will this app be multi-tenant (organization-scoped), or single-tenant?**
+> **1. Will this app be multi-tenant (organization-scoped), or single-tenant?**
 
 A wrong assumption here costs a full refactor later. Do not guess.
 
 - **Single-tenant:** features live directly under `_authenticated/`. No `$orgSlug` layer, no org-role apparatus. One role axis (`admin | user`) if any.
 - **Multi-tenant:** add a `$orgSlug.tsx` + `$orgSlug/` layout pair under `_authenticated/`, an org-onboarding route, and a two-layer role model (platform + org). Org scope rides on the router context.
 - **Unsure / "mostly single, one org feature later":** scaffold single-tenant now. Adding tenancy later is a well-defined migration; pre-building it is not.
+
+> **2. Does the backend publish an OpenAPI contract (or can it)?**
+
+- **Publishes one** → contract lane (§2a): `openapi-typescript` → `schema.d.ts` + `openapi-fetch`.
+- **We own the backend but no contract yet** → add the contract on the backend first (most frameworks derive it from routes/handlers) and stay on the contract lane. Hand-writing FE types for a backend you own is debt.
+- **Genuinely contract-less** (third-party API, legacy service not ours to change) → no-contract lane (§2b): Axios `apiClient` + per-feature Zod wire schemas, `T` types via `z.infer`, parse at the boundary.
+
+One lane per backend service — never both for the same service; a repo talking to a second contract-less service runs one lane per service.
 
 The layout below shows the single-tenant default; multi-tenant inserts the `$orgSlug` pair between `_authenticated/` and features.
 
@@ -58,20 +66,19 @@ The layout below shows the single-tenant default; multi-tenant inserts the `$org
     ├── router.tsx
     ├── routeTree.gen.ts      # GENERATED — never edit, biome-ignored
     ├── styles.css
-    ├── components/           # THREE-way split — reusable ONLY, never feature-private
-    │   ├── ui/               # primitives (shadcn + hand-built), each biome-relaxed
-    │   │   ├── typography.tsx    data-table.tsx   table.tsx      guard.tsx
-    │   │   ├── empty-state.tsx   error-message.tsx   section-boundary.tsx
-    │   │   ├── form/             # createFormHook kit
-    │   │   │   ├── app-form.ts   # useAppForm / withForm + fieldContext/formContext
-    │   │   │   ├── field-input.tsx   field-select.tsx   field-textarea.tsx
-    │   │   │   └── index.ts      # barrel
-    │   │   └── index.ts      # barrel
-    │   ├── features/         # cross-ROUTE domain composites (extract at 2+ route consumers)
-    │   └── layout/           # shells, page boundaries
+    ├── components/
+    │   └── ui/               # PURE UI primitives — zero deps on libs/api, libs/auth, routes,
+    │       │                 #   stores; npm UI libs + sibling primitives only; biome-relaxed
+    │       ├── typography.tsx    data-table.tsx   table.tsx
+    │       ├── empty-state.tsx   error-message.tsx   section-boundary.tsx
+    │       ├── form/             # createFormHook kit
+    │       │   ├── app-form.ts   # useAppForm / withForm + fieldContext/formContext
+    │       │   ├── field-input.tsx   field-select.tsx   field-textarea.tsx
+    │       │   └── index.ts      # barrel
+    │       └── index.ts      # barrel
     ├── libs/                 # ONE folder per external lib / cross-cutting singleton — each a barrel
-    │   ├── api/              # client.ts · schema.d.ts (gen) · unwrap.ts · permission.gen.ts (gen)
-    │   ├── auth/             # useAuth (session + hasPermission) — Guard's ONLY consumer
+    │   ├── api/              # client.ts · unwrap.ts · permission.gen.ts (gen) · schema.d.ts (gen, contract lane)
+    │   ├── auth/             # useAuth (session + hasPermission) + guard.tsx — Guard is hasPermission's ONLY consumer
     │   ├── tanstack-query/   # QueryClient singleton (getQueryClient)
     │   ├── clsx/             # cn()
     │   ├── constant/         # truly-global constants
@@ -86,13 +93,14 @@ The layout below shows the single-tenant default; multi-tenant inserts the `$org
             ├── <feature>.tsx               # a SMALL feature = ONE file (default — never pre-promote)
             └── <feature>/                  # promote to a folder only when the file outgrows readability
                 ├── index.tsx               # route component — composes hooks + components ONLY
-                ├── _apis/                  # small: <feature>.ts + index.ts
+                ├── _apis/                  # small: <feature>.ts (+ schema.ts, no-contract lane) + index.ts
                 │   ├── keys.ts             #   grown (>~200 LOC) → split by KIND behind a barrel:
                 │   ├── queries.ts          #     keys · queryOptions factories · mutation hooks
                 │   ├── mutations.ts
+                │   ├── schema.ts           #   Zod wire schemas (no-contract lane only)
                 │   └── index.ts            # barrel
                 ├── _hooks/                 # use-<feature>-form.ts + store-selector/composed hooks + index.ts
-                ├── _schema/                # zod schema + xToFormValues mapper + EMPTY_ defaults + index.ts
+                ├── _schema/                # FORM zod schema + xToFormValues mapper + EMPTY_ defaults + index.ts
                 ├── _stores/                # TanStack Store: table/filter/dialog state + index.ts
                 ├── _constants/             # status→tone maps, option lists — module-scoped + index.ts
                 └── _components/            # tables, forms, columns, dialogs — Guarded + index.ts
@@ -101,14 +109,20 @@ The layout below shows the single-tenant default; multi-tenant inserts the `$org
 - **One concern per `_xxx` folder — never mix kinds.** `_apis` is API only, `_constants` constants only, `_stores` stores only (*"jangan di campur adukan, bukan gado gado"*). Module-scoped → the module's own `_xxx/`; truly global → `utils/` / `libs/constant`.
 - **Every folder exposes a single `index.ts` barrel** — the outside imports the *folder*, not its internals (low coupling). Exceptions (never split/touch): generated `schema.d.ts` / `permission.gen.ts` / `routeTree.gen.ts`, and shadcn `components/ui/*`.
 - **Promotion path (SRP + YAGNI):** a feature starts as one file `<feature>.tsx`; promote to a `<feature>/` folder when 3+ files of mixed kinds belong to it; split `_apis` itself into `keys/queries/mutations` only when its single `<feature>.ts` crosses the ~150–200 LOC smell threshold. Never pre-promote, never pre-split.
-- **Component placement:** feature-private → `<feature>/_components/`; cross-route reuse → `components/features/` (extract at 2+ route consumers, migrate all in the same change); primitive → `components/ui/`. Never re-implement a primitive that already exists — grep first.
+- **`components/` is PURE UI — zero dependency on anything app-side.** Primitives import npm UI libs (react-aria-components, cva, TanStack Table/Form) and sibling primitives only — NEVER `libs/api`, `libs/auth`, stores, or route code. Anything needing session, permissions, or server data does not belong here (that's why `Guard` lives in `libs/auth/`).
+- **No `components/features/`, no `components/layout/`** — domain composites and layouts live in the routes tree: `__root.tsx` / `_authenticated.tsx` / `_public.tsx` ARE the layout shells; shared-across-routes UI goes in that scope's `_components/` (`_authenticated/_components/`).
+- **Component placement:** feature-private → `<feature>/_components/`; shared across routes of a scope → the scope's `_components/` (extract at 2+ route consumers, migrate all in the same change); pure primitive → `components/ui/`. Never re-implement a primitive that already exists — grep first.
 - **kebab-case** every file and folder name. Underscore folders are invisible to the router (`routeFileIgnorePattern`) and scope by placement.
 
 ---
 
-## 2. Contract → types (the only type bridge)
+## 2. Wire types — two lanes, one rule
 
-When the backend is not TypeScript, domain types come from the OpenAPI contract, not shared code.
+**The rule in both lanes: feature code NEVER hand-writes a loose API type.** Every wire `T` type is derived — from the generated OpenAPI contract (contract lane, the default) or via `z.infer` from a Zod wire schema that actually parses the response (no-contract lane). A type someone typed from memory, guaranteed by nothing, is banned everywhere.
+
+### 2a. Contract lane (default) — OpenAPI → `openapi-typescript`
+
+When the backend publishes a contract, types come from it, not shared code.
 
 - Source of truth: the backend's `openapi.yaml` (or `openapi.json`).
 - `openapi-ts.config.ts` runs `openapi-typescript` against it and writes `src/libs/api/schema.d.ts`.
@@ -135,13 +149,80 @@ export default defineConfig({
 
 Regenerate after any contract change: `pnpm gen:api` → `schema.d.ts`. Never hand-edit it.
 
-> **Permissions are a SEPARATE generated catalog, not part of the domain types.** The permission set is mirrored from the backend's permission enum into `libs/api/permission.gen.ts` (`PERMISSIONS`), synced by its own chore step — see §11. Never hand-add permission keys; never fetch the permission list at runtime.
+### 2b. No-contract lane — FE-owned Zod wire schemas at the boundary
+
+When the backend genuinely publishes no OpenAPI document (§0 decided this), the frontend owns the wire contract as **per-feature Zod schemas**, and the boundary **parses instead of trusts**:
+
+- Wire schemas live in the feature's **`_apis/schema.ts`** — the wire shape is an API concern, same folder as the calls. NOT `_schema/` (forms only).
+- **Every wire `T` type = `z.infer<typeof xSchema>`** — the schema is the single source; a hand-written type with no validator behind it is banned.
+- The `unwrap` trio takes the schema and **`safeParse`s** the response: backend drift fails loudly at the seam with the required `msg` and surfaces through the ErrorBoundary — never as `undefined` rendering three components deep. No `as` needed at all — the parse produces the type.
+- Client: there is no `paths` type to bind, so `openapi-fetch` is out — ONE Axios **`apiClient`** singleton in `libs/api/client.ts` (`withCredentials: true`). Same home, same barrel.
+- Everything downstream is IDENTICAL: key factories, `queryOptions`, hook-level mutation lifecycle, boundaries, `<Guard>`.
+- The moment a contract appears, migrate to the contract lane (generate `schema.d.ts`, swap `z.infer` types for generated ones, drop the wire schemas) — a well-defined migration.
+
+```ts
+// libs/api/client.ts (no-contract lane)
+import axios from "axios"
+
+export const apiClient = axios.create({
+	baseURL: "/api/v1",
+	withCredentials: true,
+})
+```
+
+```ts
+// _apis/schema.ts — the FE-owned wire contract
+export const <resource>ItemSchema = z.object({
+	id: z.string(),
+	name: z.string(),
+	status: z.enum(["active", "inactive"]),
+})
+export type T<Resource>Item = z.infer<typeof <resource>ItemSchema>
+```
+
+```ts
+// libs/api/unwrap.ts (no-contract lane) — parse, never trust
+const paginationMetaSchema = z.object({ page: z.number(), perPage: z.number(), total: z.number() })
+type TPaginationMeta = z.infer<typeof paginationMetaSchema>
+type TPage<T> = { data: T[]; meta: TPaginationMeta }
+
+const envelope = <T>(schema: z.ZodType<T>) => z.object({ data: schema, message: z.string() })
+const pageEnvelope = <T>(schema: z.ZodType<T>) => z.object({ data: z.array(schema), meta: paginationMetaSchema })
+
+export function parseData<T>(schema: z.ZodType<T>, payload: unknown, msg: string): T {
+	const parsed = schema.safeParse(payload)
+	if (!parsed.success) throw new Error(msg)
+	return parsed.data
+}
+
+export function unwrap<T>(schema: z.ZodType<T>, payload: unknown, msg: string): T {
+	return parseData(envelope(schema), payload, msg).data
+}
+
+export function unwrapList<T>(schema: z.ZodType<T>, payload: unknown, msg: string): T[] {
+	return parseData(envelope(z.array(schema)), payload, msg).data
+}
+
+export function unwrapPage<T>(schema: z.ZodType<T>, payload: unknown, msg: string): TPage<T> {
+	return parseData(pageEnvelope(schema), payload, msg)
+}
+```
+
+```ts
+// _apis/<resource>.ts (no-contract lane queryFn)
+queryFn: async () =>
+	unwrapPage(<resource>ItemSchema, (await apiClient.get("/<resource>", { params })).data, "Failed to load <resource>s"),
+```
+
+A third-party API that doesn't use the `{ data, message }` envelope gets `parseData(rawBodySchema, payload, msg)` directly — same parse-or-throw, the schema describes the raw body.
+
+> **Permissions are a SEPARATE generated catalog, not part of the domain types.** The permission set is mirrored from the backend's permission enum into `libs/api/permission.gen.ts` (`PERMISSIONS`), synced by its own chore step — see §11. It syncs from the backend's enum, not from OpenAPI, so it exists in BOTH lanes. Never hand-add permission keys; never fetch the permission list at runtime.
 
 ---
 
 ## 3. API client + `unwrap` trio (the response boundary)
 
-One `openapi-fetch` client, cookie-credentialed, typed against the generated `paths`.
+**Contract lane:** one `openapi-fetch` client, cookie-credentialed, typed against the generated `paths`.
 
 ```ts
 // libs/api/client.ts
@@ -157,7 +238,7 @@ export const api = createClient<paths>({
 **Never repeat the `{ data, error }` check in every `queryFn`.** Unwrap the envelope through ONE util family in `libs/api/unwrap.ts` — the message argument is required, and unwrap **throws** so errors reach the boundaries (§9). This is the ONLY sanctioned `as`, inside the validated `isEnvelope` guard.
 
 ```ts
-// libs/api/unwrap.ts
+// libs/api/unwrap.ts (contract lane)
 type TEnvelope<T> = { data: T; message: string }
 type TPage<T> = { data: T[]; meta: TPaginationMeta }
 
@@ -179,6 +260,8 @@ export function unwrapPage<T>(resp: { data?: TPage<T>; error?: unknown }, msg: s
 	return data
 }
 ```
+
+**No-contract lane (§2b):** same discipline, different internals — the client is the Axios `apiClient` singleton and the trio takes the wire schema and parses (`unwrap(schema, payload, msg)`). Required `msg`, throws to boundaries, ONE client + ONE unwrap family either way.
 
 There are **no free-standing `_apis` fetch functions** — the call + unwrap live directly inside `queryFn`/`mutationFn` in the feature's `_apis/<feature>.ts` (§5/§6).
 
@@ -203,7 +286,7 @@ This table is the no-React-hooks discipline made concrete. React's own hooks are
 
 ## 5. Query key factory + `queryOptions` (the `_apis` shape)
 
-Each feature's `_apis/<feature>.ts` owns: `T` types (from the schema), the key factory (**query AND mutation keys**), `queryOptions` factories, and mutation hooks (§6). Never inline a key anywhere.
+Each feature's `_apis/<feature>.ts` owns: `T` types (derived per §2), the key factory (**query AND mutation keys**), `queryOptions` factories, and mutation hooks (§6). Never inline a key anywhere.
 
 ```ts
 // _apis/<resource>.ts
@@ -360,8 +443,8 @@ export function SectionBoundary(props: TSectionBoundaryProps): ReactElement {
 	return (
 		<QueryErrorResetBoundary>
 			{({ reset }) => (
-				<ErrorBoundary onReset={reset} fallbackRender={({ resetErrorBoundary }) => (
-					<ErrorMessage error={props.error} onRetry={resetErrorBoundary} fallback={props.fallback} />
+				<ErrorBoundary onReset={reset} fallbackRender={({ error, resetErrorBoundary }) => (
+					<ErrorMessage error={error} onRetry={resetErrorBoundary} fallback={props.fallback} />
 				)}>
 					<Suspense fallback={props.pending}>{props.children}</Suspense>
 				</ErrorBoundary>
@@ -430,7 +513,7 @@ His #1 repeat-blocker. RBAC is **two tiers, both required** — the route guard 
 **Tier 2 — UI gating = ONE declarative `<Guard>` component.** Wrap every permission-gated control. Declarative, no `can`-spam, no per-module hooks, no ternaries.
 
 ```tsx
-// components/ui/guard.tsx — the ONLY place that touches hasPermission
+// libs/auth/guard.tsx — the ONLY place that touches hasPermission (components/ stays pure UI)
 type TGuardProps = { permissions: string[]; children: ReactNode }
 export function Guard(props: TGuardProps): ReactElement {
 	const { hasPermission } = useAuth()
@@ -452,7 +535,7 @@ export function Guard(props: TGuardProps): ReactElement {
 
 - **`type` ONLY — NEVER `interface`.** Not even for public/object shapes. No `I` prefix, no `E` prefix (no interfaces/enums-as-`E` exist). Prefix type aliases with **`T`** (`TNavItem`).
 - **No `any`. No `as` casts** (the only sanctioned `as` is inside the validated `isEnvelope` guard in `unwrap.ts`). `import type { … }` for type-only imports.
-- **Types come ONLY from the OpenAPI contract** (`schema.d.ts`) — no hand-written API types, no imported backend code. Never edit `schema.d.ts` or `routeTree.gen.ts`.
+- **Wire types are always derived (§2)** — contract lane: only from `schema.d.ts`; no-contract lane: only `z.infer` of `_apis/schema.ts` wire schemas. No loose hand-written API types, no imported backend code. Never edit `schema.d.ts` or `routeTree.gen.ts`.
 - **No raw string literals for ANY backend enum value** (status / role / kind / permission) — use the typed constant/enum, **even inside `ts-pattern .with(...)`**.
 - **kebab-case** for all file and folder names (`use-list-items.ts`, `<resource>-schema.ts`).
 - `tsconfig`: `strict`, `noUnusedLocals`, `verbatimModuleSyntax`, `allowImportingTsExtensions`. Use `.ts`/`.tsx` extensions in relative imports. Path alias **`#/*` → `src/*`**.
@@ -463,8 +546,8 @@ export function Guard(props: TGuardProps): ReactElement {
 
 ## 13. Adding a feature — standard workflow
 
-1. **Contract first:** confirm the endpoints exist in the backend's OpenAPI; if not, that change lands in the backend first. Then `pnpm gen:api` → `schema.d.ts` (+ `permission.gen.ts` if the backend added perms).
-2. **`_apis/<feature>.ts`:** `T` types (from schema) + `<resource>Keys` factory (query AND mutation keys) + `queryOptions` factories + mutation hooks (hook-level `onSuccess`), all unwrapped via `unwrap`/`unwrapList`/`unwrapPage`.
+1. **Contract first:** contract lane — confirm the endpoints exist in the backend's OpenAPI (if not, that change lands in the backend first), then `pnpm gen:api` → `schema.d.ts`. No-contract lane — write/extend the feature's wire schemas in `_apis/schema.ts` against the real response. Either lane: `permission.gen.ts` syncs if the backend's perms changed.
+2. **`_apis/<feature>.ts`:** `T` types (derived per §2) + `<resource>Keys` factory (query AND mutation keys) + `queryOptions` factories + mutation hooks (hook-level `onSuccess`), all unwrapped via `unwrap`/`unwrapList`/`unwrapPage` (no-contract lane: the schema-parsing variants).
 3. **`_schema/`:** Zod schema + `xToFormValues` mapper + `EMPTY_` defaults.
 4. **`_hooks/`:** `use-<feature>-form.ts` (via `useAppForm` kit) + any store-selector/composed hooks.
 5. **`_stores/`:** module-level TanStack Store for table/filter/dialog state (search debounced; filter change resets `pageIndex`).
@@ -479,7 +562,7 @@ export function Guard(props: TGuardProps): ReactElement {
 ```
 [ ] type only, T-prefixed — zero interface / I / E; zero any; zero as (except unwrap's guard)
 [ ] every component annotates : ReactElement; feature comps read props.x (no destructure)
-[ ] types ONLY from the OpenAPI contract; schema.d.ts / routeTree.gen.ts / permission.gen.ts untouched
+[ ] wire types derived (§2): schema.d.ts (contract lane) or z.infer of _apis/schema.ts parsed by unwrap (no-contract lane); generated files untouched
 [ ] zero React state hooks — TanStack only (Suspense/Fragment/ErrorBoundary class comp allowed)
 [ ] zero ? : ternaries in UI — {cond && <X/>} / ts-pattern match / cn() lookup; .with() on typed constants
 [ ] text via <Typography> — zero raw <span>; lists via DataTable/Table — zero raw <table>
@@ -492,6 +575,7 @@ export function Guard(props: TGuardProps): ReactElement {
 [ ] forms: useAppForm kit; use-<feature>-form.ts in _hooks/; schema+mapper+EMPTY_ in _schema/; create/edit in a modal
 [ ] RBAC two-tier: beforeLoad requirePermission(qc, PERMISSIONS.x) AND <Guard> on every action + the read view
 [ ] permission checks use PERMISSIONS.* (never raw strings, never runtime-fetched); zero useXPermissions/can*-spam
+[ ] components/ui is pure UI (zero libs/api / libs/auth / store / route imports); Guard in libs/auth; no components/features or components/layout
 [ ] one concern per _folder; kebab-case; comment-free; fallbacks at component/hook level (no ?? "-" at call sites)
 [ ] no ?? spam (3+ → ts-pattern); typed booleans passed directly; nullable guarded early in utils; items?.map
 [ ] stable id keys; normalized display values; loading="lazy"; no hardcoded px (relative + max-w); min-h-dvh not h-screen
